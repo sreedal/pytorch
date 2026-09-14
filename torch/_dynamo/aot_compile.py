@@ -824,44 +824,54 @@ class AOTCompiledFunction:
         guard_scope.setdefault("__builtins__", builtins.__dict__)
         guard_scope[builtins_key] = get_builtins_dict(guard_scope)
 
-    def _missing_global_hint(self) -> str:
+    def _missing_global_hint(self, *, forward: str | None = None) -> str:
         """Advice for a guard that failed on a global its scope does not define,
-        worded for the scope the guards were actually resolved against."""
+        worded for the scope the guards were actually resolved against. Returns a
+        bare sentence; a caller that continues a line of its own adds the
+        separator. ``forward`` names the instance attribute a module load resolved
+        the scope from, passed only when the guards hold the dict it resolves to,
+        and honoured only in the SUPPLIED branch."""
         if self._guard_scope is _GuardScope.RECONSTRUCTED:
+            rebuilt = (
+                "a guarded global is missing from the scope rebuilt from the artifact"
+            )
             if self._forward_not_resolved_reason is not None:
                 # A module load takes no f_globals=, which is the function load's
                 # parameter; _load_aot_compiled_module takes only the bytes.
                 return (
-                    " -- a guarded global is missing from the scope rebuilt from "
-                    "the artifact. That scope was rebuilt because "
+                    f"{rebuilt}. That scope was rebuilt because "
                     f"{self._forward_not_resolved_reason}, or pass "
                     "AOTCompiledModel.deserialize a guard_globals= scope that "
                     "carries the name."
                 )
             return (
-                " -- a guarded global is missing from the scope rebuilt from the "
-                "artifact; load with an f_globals= that is a complete live scope "
-                "carrying the name -- normally vars(mod) for the module mod that "
-                "defined the function, which is usually not the module doing the "
-                "loading -- so the guard can resolve it."
+                f"{rebuilt}; load with an f_globals= that is a complete live "
+                "scope carrying the name -- normally vars(mod) for the module "
+                "mod that defined the function, which is usually not the module "
+                "doing the loading -- so the guard can resolve it."
             )
         if self._guard_scope is _GuardScope.SUPPLIED:
-            # SUPPLIED implies a scope; named by its module when it is one,
-            # since a module load resolved it from model.forward and the caller
-            # passed no dict to be sent back to.
+            # SUPPLIED implies a scope; a module's namespace is named by its
+            # module, since a module load resolved it from model.forward and the
+            # caller passed no dict to be sent back to.
             namespace = _module_namespace_name(self._guard_globals or {})
-            where = "" if namespace is None else f", here vars({namespace})"
+            named = "" if namespace is None else f", here vars({namespace})"
+            where = (
+                f"the globals of the function {forward} resolves to, since that "
+                f"is the one the load resolved{named}"
+                if forward is not None
+                else f"the live scope this artifact was loaded against{named}"
+            )
             return (
-                " -- a guarded global is missing from the live scope this "
-                f"artifact was loaded against{where}; define it there so the "
-                "guard can resolve it."
+                f"a guarded global is missing from {where}; define it there "
+                "so the guard can resolve it."
             )
         # CAPTURED: the guards hold the globals they were traced against BY
         # REFERENCE, so a name deleted after capture can be defined there again
         # to make the guard resolve -- the same advice as SUPPLIED, worded for
         # the dict this path actually used.
         return (
-            " -- a guarded global is missing from the globals of the module the "
+            "a guarded global is missing from the globals of the module the "
             "compiled function was traced in, which its guards still resolve "
             "against; define it there so the guard can resolve it."
         )
@@ -878,7 +888,7 @@ class AOTCompiledFunction:
                 # ends in a newline, so the hint has to be appended to the
                 # stripped message: otherwise its inline continuation lands on a
                 # line of its own, starting with a stray space.
-                msg = msg.rstrip() + self._missing_global_hint()
+                msg = msg.rstrip() + " -- " + self._missing_global_hint()
             raise RuntimeError(msg)
         return self.fn(*args, **kwargs)
 
@@ -1492,7 +1502,8 @@ class AOTCompiledModel:
             if self._binds_alike(results)
             else None
         )
-        # Per-result bindings, kept for the re-check; a shared one is reused as is.
+        # Per-result bindings, kept for the re-check and the report; a shared one
+        # is reused as is.
         bound: list[dict[str, object]] = []
         # Guard evaluation ignores _guard_check_enabled, so scan every result.
         for result in results:
@@ -1516,8 +1527,67 @@ class AOTCompiledModel:
         for result in results:
             if not result._guard_check_enabled:
                 return result.fn(self.model, *args, **kwargs)
-        # All guards failed, just run one of them and throw the guard check error.
-        return results[0](self.model, *args, **kwargs)
+        if shared is not None:
+            bound = [shared] * len(results)
+        raise RuntimeError(self._no_match_report(results, bound))
+
+    def _no_match_report(
+        self, results: tuple[AOTCompiledFunction, ...], bound: list[dict[str, object]]
+    ) -> str:
+        """A report naming every compiled input and what its guards said.
+
+        ``results`` and ``bound`` are the results the dispatch above judged and
+        the f_locals it judged them on, one per result, so the report explains
+        the same call rather than a fresh one."""
+        lines = [
+            "No AOT compiled graph matched this call. Tried "
+            f"{len(results)} compiled input(s):"
+        ]
+        missing_at: int | None = None
+        for i, result in enumerate(results):
+            reason = result._live_guard_manager().check_verbose(bound[i])
+            if reason.result:
+                lines.append(
+                    f"  [{i}] <guards rejected this call twice and then accepted "
+                    "it here: a guard that does not answer consistently, or a "
+                    "tag-safe fast path that refused without running the tree>"
+                )
+                continue
+            if not reason.verbose_code_parts:
+                # A failing accessor can answer false with no parts to quote.
+                lines.append(f"  [{i}] <guard check failed without naming a guard>")
+                continue
+            parts = reason.verbose_code_parts
+            if missing_at is None and any(map(_names_a_missing_global, parts)):
+                missing_at = i
+            # Collapse every separator splitlines() reads the report back on.
+            joined = " ".join("; ".join(parts).splitlines())
+            lines.append(f"  [{i}] {joined}")
+        if missing_at is not None:
+            missing_global = results[missing_at]
+            # Named as the instance attribute: the load resolved the scope from
+            # model.forward, and a rebound instance reads another function's dict.
+            forward: str | None = f"this {type(self.model).__name__} instance's forward"
+            resolved: dict[str, Any] | None = None
+            if missing_global._guard_scope is _GuardScope.SUPPLIED:
+                # Resolving forward runs user code: get_traced_fn formats a
+                # forward it refuses into its error, and that repr can raise past
+                # what _resolve_guard_scope catches. The report must still arrive.
+                try:
+                    resolved, _ = _resolve_guard_scope(self.model)
+                except Exception:
+                    pass
+            if resolved is None or resolved is not missing_global._guard_globals:
+                forward = None
+            hint = missing_global._missing_global_hint(forward=forward)
+            lines.append(f"For [{missing_at}]: {hint}")
+        lines.append(
+            "Add a ModelInput covering this call, or check whether "
+            "guard_filter_fn kept a guard this call cannot satisfy -- both "
+            "belong to the process that compiles the artifacts, which need not "
+            "be the one that loaded them."
+        )
+        return "\n".join(lines)
 
     def serialize(self) -> bytes:
         # Nothing threads external_data down this path (_save_aot_compiled_module

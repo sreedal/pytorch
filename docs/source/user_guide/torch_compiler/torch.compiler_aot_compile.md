@@ -422,4 +422,5 @@ input whose guards match, and evaluates the guards of an input opted out
 through `model.forward.compiled_results[i].disable_guard_check()` as well:
 opting out here suppresses the failure, not the evaluation, so such an input is
 served on a match like any other, and on the strength of its opt-out alone only
-when nothing matched.
+when nothing matched -- one opt-out replaces the
+`No AOT compiled graph matched this call` error for the whole model.
