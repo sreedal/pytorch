@@ -53,6 +53,7 @@ _MISSING_GLOBAL_RE = re.compile(r"KeyError on G\[(?P<name>[^\[\]]*)\]")
 # The G['NAME'] operands of a symbolic-shape guard installed as a Python lambda.
 # Anchored: shape exprs are source names, so L['self'].myG['k'] carries no global.
 _SHAPE_GUARD_GLOBAL_RE = re.compile(r"\bG\['([^']*)'\]")
+_UNBOUND = object()
 
 # Names Dynamo mints into the scope the guards resolve against, rather than
 # names the caller wrote: the __import_* module aliases, the __builtins_dict___N
@@ -639,10 +640,6 @@ class AOTCompiledFunction:
     # Whether a kept guard is rooted at a user global; False until a load
     # decides it. Arms the live-value pick, and deserialize's fallback warning.
     _has_global_guards: bool = dataclasses.field(init=False, default=False)
-    # Whether the load-time merge of the guarded names into the bytecode's
-    # globals runs, which only a caller that supplied a guard scope but no
-    # f_globals -- the module load path -- needs.
-    _bytecode_reads_guard_scope: bool = False
     # The globals a kept guard is rooted at, armed only for a supplied live
     # scope. _serve re-takes them out of _guard_globals before every call: the
     # guards read that dict by reference while the bytecode's globals are a dict
@@ -737,18 +734,13 @@ class AOTCompiledFunction:
                     # artifact was traced with.
                     certified = _guard_source_globals(output_graph) - {builtins_key}
                     self._live_global_names = tuple(sorted(certified))
-                    if self._bytecode_reads_guard_scope:
-                        # Redundant for any call, since _serve re-takes these
-                        # same names before each one; kept so the bytecode's
-                        # globals agree with the scope from the load onwards,
-                        # and so this does not delete a field the stack below
-                        # just introduced.
-                        live = {
-                            name: guard_scope[name]
-                            for name in certified
-                            if name in guard_scope
-                        }
-                        extra_globals = {**(extra_globals or {}), **live}
+                    # Bound at load as well as re-taken per call in _serve: a
+                    # certified name the bytecode reads but the graph never
+                    # lifted -- a global the forward mutates or returns -- is
+                    # in external_refs and in no serialized scope, so
+                    # forward_callable's check fails unless it is bound here.
+                    live = {n: guard_scope[n] for n in certified if n in guard_scope}
+                    extra_globals = {**(extra_globals or {}), **live}
 
         self.fn = self._artifacts.runtime_env.forward_callable(
             self._artifacts.backend_id,
@@ -1028,8 +1020,9 @@ class AOTCompiledFunction:
         if self._live_global_names and (scope := self._guard_globals) is not None:
             f_globals = self.fn.__globals__
             for name in self._live_global_names:
-                if name in scope:
-                    f_globals[name] = scope[name]
+                value = scope.get(name, _UNBOUND)
+                if value is not _UNBOUND:
+                    f_globals[name] = value
         return self.fn(*args, **kwargs)
 
     def source_info(self) -> "SourceInfo":
@@ -1125,7 +1118,6 @@ class AOTCompiledFunction:
         external_closure_data: dict[str, Any] | None = None,
         *,
         guard_globals: dict[str, object] | None = None,
-        bytecode_reads_guard_scope: bool = False,
         forward_not_resolved_reason: str | None = None,
     ) -> "AOTCompiledFunction":
         """Rebuild a compiled function from ``serialize()`` output.
@@ -1137,18 +1129,17 @@ class AOTCompiledFunction:
         "no scope" -- and the load WRITES into it, seeding the recorded aliases,
         builtins-dict key and unnamed-scope key a kept guard is rooted at without
         replacing a name it already binds, so pass the dict those should land in.
-        Supplying it also arms the per-call re-read ``_serve`` performs: a global a
-        kept guard's own source IS -- not one reached only through a sub-path of
-        it, which the guard does not certify, and apart from the recorded
-        ``__builtins_dict___N`` key, excluded by name -- is taken from that dict on
-        every call, one name at a time, so the graph reads only what a guard
-        certifies and never a global whose guard a filter dropped. Passing neither
-        resolves global guards against the scope rebuilt from the artifact, where a
-        rebinding in this process is invisible.
-
-        ``bytecode_reads_guard_scope`` additionally merges that same set into the
-        bytecode's globals at load time, for a caller whose scope the bytecode
-        does not otherwise read, i.e. the module load path.
+        Supplying it also binds the certified globals into the bytecode's globals
+        at load and arms the per-call re-read ``_serve`` performs: a global a kept
+        guard's own source IS -- not one reached only through a sub-path of it,
+        which the guard does not certify, and apart from the recorded
+        ``__builtins_dict___N`` key, excluded by name -- is taken from that dict at
+        load and on every call, one name at a time, so the graph reads only what a
+        guard certifies and never a global whose guard a filter dropped; the
+        load-time bind is what lets a ``guard_globals``-only load succeed where the
+        serialized scope lacks such a global. Passing neither resolves global
+        guards against the scope rebuilt from the artifact, where a rebinding in
+        this process is invisible.
         """
         f = io.BytesIO(data)
         f.seek(0)
@@ -1169,7 +1160,6 @@ class AOTCompiledFunction:
             artifacts,
             _extra_globals=f_globals,
             _guard_globals=guard_globals,
-            _bytecode_reads_guard_scope=bytecode_reads_guard_scope,
             _forward_not_resolved_reason=forward_not_resolved_reason,
         )
 
@@ -2105,8 +2095,8 @@ class AOTCompiledModel:
 
         ``guard_globals``, when supplied, is that scope instead of anything
         resolved from ``model.forward``, so a caller who wants neither the live
-        read nor the write passes its own dict; it is seeded and re-read from on
-        the same terms.
+        read nor the write passes its own dict; it is seeded, bound into the
+        bytecode's globals at load, and re-read from on the same terms.
 
         Hooks registered on ``model`` do not run: the artifact calls ``forward``
         directly. The artifact records none, so what is warned about here is what
@@ -2150,7 +2140,6 @@ class AOTCompiledModel:
                     AOTCompiledFunction.deserialize(
                         result,
                         guard_globals=scope,
-                        bytecode_reads_guard_scope=True,
                         forward_not_resolved_reason=forward_not_resolved_reason,
                     )
                 )
