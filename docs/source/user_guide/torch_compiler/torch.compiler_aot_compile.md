@@ -131,7 +131,10 @@ original function but runs the pre-compiled code. It also exposes:
   On this function path the compiled function then runs whatever it is called
   with, without evaluating its guards; module dispatch over several compiled
   inputs still evaluates them, as described under
-  {ref}`Developer notes <aot-compile-developer-notes>`.
+  {ref}`Developer notes <aot-compile-developer-notes>`. The opt-out does not
+  stop the per-call re-read of the globals a kept guard is rooted at, so a
+  loaded artifact that opted out goes on serving whatever its guard scope
+  binds, unchecked.
 
 **Requirements:**
 
@@ -168,13 +171,18 @@ Load a previously saved AOT-compiled function from a file.
   insert names of its own, never overwriting an existing key: the
   Dynamo-generated globals a kept guard is rooted at, and
   `__builtins__` when it has to build the builtins dict one of those names
-  holds. The bytecode does not read this dict: it reads a snapshot, taken at
-  load time, of the globals serialized with the artifact with this dict merged
-  over them, so a name the dict omits still resolves there. That the two can
-  disagree is a known limitation rather than a contract to rely on: a rebind
-  the guards accept leaves the call computing with the load-time value, so
-  only a rebind they reject changes what the call does, by raising. When
-  omitted, global guards are resolved against the scope rebuilt from the
+  holds. A global a kept guard is rooted at is re-read from this dict on every
+  call, so a rebind the guards accept is what the call computes with, and one
+  they reject raises instead. That re-read is not atomic with the guard check
+  before it, so a rebind landing between the two is served unchecked, exactly as
+  an eager compiled frame serves one landing between its guards and its globals.
+  The re-read writes into the loaded artifact's own globals dict, which every
+  call of it shares, so two threads serving one loaded artifact race on that
+  write; a caller who needs isolation loads the artifact once per thread.
+  Every other global is read once, at load time,
+  from this dict merged over the globals serialized with the artifact, which is
+  why a name the dict omits still resolves.
+  When omitted, global guards are resolved against the scope rebuilt from the
   artifact instead, where a rebinding in this process is invisible. Passing
   `{}` is not that: it installs a live but empty guard scope, so every kept
   guard rooted at a global the load does not seed itself fails with
