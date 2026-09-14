@@ -31,7 +31,6 @@ jobs:
       issue_owner: ${{ github.event.pull_request.user.login || github.event.issue.user.login }}
       curr_branch: ${{ github.head_ref || github.ref_name }}
       curr_ref_type: ${{ github.ref_type }}
-      check_experiments: amd-do
       opt_out_experiments: lf
 
   periodic-dynamo-benchmarks-build:
@@ -43,6 +42,7 @@ jobs:
       runner: linux.4xlarge.memory
       build-environment: linux-jammy-cuda13.0-py3.10-gcc11-sm86
       docker-image-name: ci-image:pytorch-linux-jammy-cuda13.0-cudnn9-py3-gcc11-inductor-benchmarks
+      rocm-arch-list: gfx950
       ci-docker-hash: ${{ needs.get-default-label-prefix.outputs.ci-docker-hash }}
       cuda-arch-list: '8.0;8.6'
       test-matrix: |
@@ -94,16 +94,16 @@ jobs:
       ci-docker-hash: ${{ needs.get-default-label-prefix.outputs.ci-docker-hash }}
       test-matrix: |
         { include: [
-          { config: "dynamic_inductor_huggingface", shard: 1, num_shards: 1, runner: "${{ needs.get-default-label-prefix.outputs.amd-do-label-type }}linux.rocm.gpu.gfx950.1" },
-          { config: "dynamic_inductor_timm", shard: 1, num_shards: 2, runner: "${{ needs.get-default-label-prefix.outputs.amd-do-label-type }}linux.rocm.gpu.gfx950.1" },
-          { config: "dynamic_inductor_timm", shard: 2, num_shards: 2, runner: "${{ needs.get-default-label-prefix.outputs.amd-do-label-type }}linux.rocm.gpu.gfx950.1" },
-          { config: "dynamic_inductor_torchbench", shard: 1, num_shards: 2, runner: "${{ needs.get-default-label-prefix.outputs.amd-do-label-type }}linux.rocm.gpu.gfx950.1" },
-          { config: "dynamic_inductor_torchbench", shard: 2, num_shards: 2, runner: "${{ needs.get-default-label-prefix.outputs.amd-do-label-type }}linux.rocm.gpu.gfx950.1" },
-          { config: "aot_inductor_huggingface", shard: 1, num_shards: 1, runner: "${{ needs.get-default-label-prefix.outputs.amd-do-label-type }}linux.rocm.gpu.gfx950.1" },
-          { config: "aot_inductor_timm", shard: 1, num_shards: 2, runner: "${{ needs.get-default-label-prefix.outputs.amd-do-label-type }}linux.rocm.gpu.gfx950.1" },
-          { config: "aot_inductor_timm", shard: 2, num_shards: 2, runner: "${{ needs.get-default-label-prefix.outputs.amd-do-label-type }}linux.rocm.gpu.gfx950.1" },
-          { config: "aot_inductor_torchbench", shard: 1, num_shards: 2, runner: "${{ needs.get-default-label-prefix.outputs.amd-do-label-type }}linux.rocm.gpu.gfx950.1" },
-          { config: "aot_inductor_torchbench", shard: 2, num_shards: 2, runner: "${{ needs.get-default-label-prefix.outputs.amd-do-label-type }}linux.rocm.gpu.gfx950.1" },
+          { config: "dynamic_inductor_huggingface", shard: 1, num_shards: 1, runner: "linux.rocm.gpu.gfx950.1" },
+          { config: "dynamic_inductor_timm", shard: 1, num_shards: 2, runner: "linux.rocm.gpu.gfx950.1" },
+          { config: "dynamic_inductor_timm", shard: 2, num_shards: 2, runner: "linux.rocm.gpu.gfx950.1" },
+          { config: "dynamic_inductor_torchbench", shard: 1, num_shards: 2, runner: "linux.rocm.gpu.gfx950.1" },
+          { config: "dynamic_inductor_torchbench", shard: 2, num_shards: 2, runner: "linux.rocm.gpu.gfx950.1" },
+          { config: "aot_inductor_huggingface", shard: 1, num_shards: 1, runner: "linux.rocm.gpu.gfx950.1" },
+          { config: "aot_inductor_timm", shard: 1, num_shards: 2, runner: "linux.rocm.gpu.gfx950.1" },
+          { config: "aot_inductor_timm", shard: 2, num_shards: 2, runner: "linux.rocm.gpu.gfx950.1" },
+          { config: "aot_inductor_torchbench", shard: 1, num_shards: 2, runner: "linux.rocm.gpu.gfx950.1" },
+          { config: "aot_inductor_torchbench", shard: 2, num_shards: 2, runner: "linux.rocm.gpu.gfx950.1" },
         ]}
       build-additional-packages: "fbgemm"
     secrets: inherit
